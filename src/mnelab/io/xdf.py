@@ -14,7 +14,7 @@ class RawXDF(BaseRaw):
     """Raw data from .xdf file."""
 
     def __init__(
-        self, fname, stream_ids, marker_ids=None, prefix_markers=False, fs_new=None
+        self, fname, stream_ids, marker_ids=None, prefix_markers=False, fs_new=None, gap_threshold=1.0
     ):
         """Read raw data from .xdf file.
 
@@ -41,6 +41,9 @@ class RawXDF(BaseRaw):
 
         streams, _ = load_xdf(fname)
         streams = {stream["info"]["stream_id"]: stream for stream in streams}
+
+        # Use these functions after loading the data
+        
 
         if all(_is_markerstream(streams[stream_id]) for stream_id in stream_ids):
             raise RuntimeError(
@@ -79,9 +82,12 @@ class RawXDF(BaseRaw):
             data, first_time = _resample_streams(streams, stream_ids, fs_new)
             fs = fs_new
         else:  # only possible if a single stream was selected
-            data = streams[stream_ids[0]]["time_series"]
-            first_time = streams[stream_ids[0]]["time_stamps"][0]
             fs = float(np.array(stream["info"]["effective_srate"]).item())
+            data = streams[stream_ids[0]]["time_series"]
+        
+        # insert nan for missing data instead of interpolation
+        gap_indices = _detect_gaps(streams[stream_ids[0]]["time_stamps"], gap_threshold)
+        data, first_time = _insert_nans(data, streams[stream_ids[0]]["time_stamps"], gap_indices, fs)
 
         info = mne.create_info(ch_names=labels_all, sfreq=fs, ch_types=types_all)
 
@@ -103,6 +109,28 @@ class RawXDF(BaseRaw):
                 f"{prefix}{item}" for sub in stream["time_series"] for item in sub
             ]
             self.annotations.append(onsets, [0] * len(onsets), descriptions)
+
+
+def _detect_gaps(timestamps, gap_threshold):
+    gaps = np.diff(timestamps) > gap_threshold
+    return np.where(gaps)[0]
+
+
+def _insert_nans(data, timestamps, gap_indices, fs):
+    for index in gap_indices:
+        gap_size = int((timestamps[index + 1] - timestamps[index]) * fs)
+        data = np.insert(data, index + 1, np.full((gap_size, data.shape[1]), np.nan), axis=0)
+        timestamps = np.insert(
+            timestamps,
+            index + 1,
+            np.linspace(
+                timestamps[index] + 1/fs,
+                timestamps[index + 1],
+                gap_size,
+                endpoint=False
+            )
+        )
+    return data, timestamps
 
 
 def _resample_streams(streams, stream_ids, fs_new):
